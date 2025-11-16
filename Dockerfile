@@ -1,6 +1,8 @@
-FROM node:18
+FROM node:18-slim
 
-RUN apt-get update && apt-get install -y ffmpeg
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
 
@@ -9,4 +11,6 @@ RUN npm install --production
 
 COPY . .
 
-CMD ["node","index.js"]
+EXPOSE 8080
+
+CMD ["npm", "start"]
