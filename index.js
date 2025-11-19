@@ -1,3 +1,4 @@
+// ------------------ IMPORTS ------------------
 const express = require("express");
 const fetch = require("node-fetch");
 const fs = require("fs");
@@ -9,6 +10,7 @@ const ffmpeg = require("fluent-ffmpeg");
 const bodyParser = require("body-parser");
 const axios = require("axios");
 
+// ------------------ APP SETUP ------------------
 const app = express();
 app.use(bodyParser.json({ limit: "10mb" }));
 
@@ -22,34 +24,45 @@ const S3 = new AWS.S3({
   region: process.env.AWS_REGION
 });
 
-// JOB STORE (in-memory)
-const JOBS = {};
+// ------------------ OPENAI SCENE GENERATOR ------------------
+async function generateScenePrompts(script) {
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Break the script into 3-6 short, visual animation scenes. For each scene, generate a strong visual description. No titles, no text overlays, no screen instructions."
+          },
+          { role: "user", content: script }
+        ],
+        temperature: 0.9,
+      }),
+    });
 
-function splitScript(script) {
-  const sentences = script
-    .replace(/\n+/g, ". ")
-    .split(/(?<=[.?!])\s+/)
-    .filter(Boolean);
+    const data = await res.json();
+    console.log("OpenAI scene data:", data.choices?.[0]?.message?.content);
 
-  const scenes = [];
-  let block = [];
-  let approxTime = 0;
+    const scenes = data.choices[0].message.content
+      .split("\n")
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
 
-  for (let s of sentences) {
-    const est = Math.ceil(s.split(" ").length / 12);
-    if (approxTime + est > 6 && block.length > 0) {
-      scenes.push(block.join(" "));
-      block = [s];
-      approxTime = est;
-    } else {
-      block.push(s);
-      approxTime += est;
-    }
+    return scenes;
+  } catch (err) {
+    console.log("OpenAI error:", err);
+    return [script]; // fallback
   }
-  if (block.length) scenes.push(block.join(" "));
-  return scenes;
 }
 
+// ------------------ HELPERS ------------------
 async function downloadVideo(url, dest) {
   const res = await axios.get(url, { responseType: "stream" });
   await new Promise((resolve, reject) => {
@@ -88,8 +101,10 @@ async function uploadToS3(localPath, key) {
   return `https://${S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 }
 
-// -------------------- API ROUTES ------------------------
+// ------------------ JOB STORE ------------------
+const JOBS = {};
 
+// ------------------ JOB CREATE ROUTE ------------------
 app.post("/jobs", async (req, res) => {
   if (req.headers["x-worker-secret"] !== WORKER_SECRET)
     return res.status(401).send("Unauthorized");
@@ -105,12 +120,14 @@ app.post("/jobs", async (req, res) => {
 
   res.json({ jobId });
 
-  // async task in background
+  // background async task
   (async () => {
     try {
       JOBS[jobId].status = "running";
 
-      const scenes = splitScript(script);
+      // 🔥 New — Scene generation using OpenAI
+      const scenes = await generateScenePrompts(script);
+
       JOBS[jobId].totalScenes = scenes.length;
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "animexa-"));
@@ -119,14 +136,7 @@ app.post("/jobs", async (req, res) => {
       for (let i = 0; i < scenes.length; i++) {
         JOBS[jobId].progress = Math.round((i / scenes.length) * 50);
 
-        const style =
-          i % 3 === 0
-            ? "cute cartoon, colorful, soft light, animation"
-            : i % 3 === 1
-            ? "storybook style, hand drawn"
-            : "comic book style, dynamic shots";
-
-        const prompt = `${scenes[i]}. ${style}. 3-6 sec animated motion. No text.`;
+        const prompt = `${scenes[i]}. 3-6 sec animated motion. No text. colorful animation style.`;
 
         const pollUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
           prompt
@@ -151,6 +161,7 @@ app.post("/jobs", async (req, res) => {
       JOBS[jobId].status = "succeeded";
       JOBS[jobId].progress = 100;
       JOBS[jobId].url = url;
+
     } catch (e) {
       console.log("Job error:", e);
       JOBS[jobId].status = "failed";
@@ -159,6 +170,7 @@ app.post("/jobs", async (req, res) => {
   })();
 });
 
+// ------------------ JOB STATUS ROUTE ------------------
 app.get("/jobs/:id", (req, res) => {
   if (req.headers["x-worker-secret"] !== WORKER_SECRET)
     return res.status(401).send("Unauthorized");
@@ -169,5 +181,6 @@ app.get("/jobs/:id", (req, res) => {
   res.json(job);
 });
 
+// ------------------ START SERVER ------------------
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log("Worker running on", PORT));
+app.listen(PORT, () => console.log("🔥 Worker running on", PORT));
